@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -141,8 +142,36 @@ def validate_plan(plan: PatchPlan, recipes: dict) -> ValidationResult:
     messages: ghi rõ lý do từng biến (để sinh viên/giảng viên đọc được).
     """
     msgs: list[str] = []
-    ### TODO 5 ### — viết code của bạn ở đây
-    return ValidationResult(ok=False, messages=msgs)
+    if not plan.recipe_id or plan.recipe_id not in recipes:
+        msgs.append(f"Recipe không được phê duyệt: {plan.recipe_id}")
+        return ValidationResult(ok=False, messages=msgs)
+
+    definitions = recipes[plan.recipe_id].get("variables", {})
+    valid = True
+
+    for name in plan.variables:
+        if name not in definitions:
+            msgs.append(f"Biến lạ không được khai báo: {name}")
+            valid = False
+
+    for name, spec in definitions.items():
+        if name not in plan.variables:
+            if "default" in spec:
+                plan.variables[name] = spec["default"]
+            elif spec.get("required", False):
+                msgs.append(f"Thiếu biến bắt buộc: {name}")
+                valid = False
+                continue
+            else:
+                continue
+
+        value = plan.variables[name]
+        pattern = spec.get("allow_pattern")
+        if not isinstance(value, str) or (pattern is not None and re.fullmatch(pattern, value) is None):
+            msgs.append(f"Giá trị biến {name} không khớp allow_pattern: {value!r}")
+            valid = False
+
+    return ValidationResult(ok=valid, messages=msgs)
 
 
 def render_argv(step: dict, variables: dict) -> list[str]:
@@ -157,8 +186,11 @@ def render_argv(step: dict, variables: dict) -> list[str]:
     Vì sao trả list? Vì subprocess.run(argv, shell=False) sẽ coi mọi ký tự
     trong từng phần tử là DỮ LIỆU, không phải cú pháp shell.
     """
-    ### TODO 6 ### — viết code của bạn ở đây
-    return []
+    pattern = re.compile(r"\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}")
+    return [
+        pattern.sub(lambda match: str(variables.get(match.group(1), match.group(0))), arg)
+        for arg in step["argv"]
+    ]
 
 
 def execute_step(step: dict, dry_run: bool = True) -> tuple[bool, str]:
@@ -174,8 +206,26 @@ def execute_step(step: dict, dry_run: bool = True) -> tuple[bool, str]:
 
       BẮT BUỘC: shell=False. Đây là điều kiện để chống chèn lệnh.
     """
-    ### TODO 7 ### — viết code của bạn ở đây
-    return False, ""
+    argv = step["argv"]
+    if dry_run:
+        return True, f"[DRY-RUN] {' '.join(argv)}"
+
+    # Windows provides echo as a shell built-in, not an executable. Run an
+    # equivalent process so shell=False remains safe and stdout is captured.
+    command = argv
+    if sys.platform == "win32" and argv[0].lower() == "echo":
+        command = [sys.executable, "-c", "import sys; print(' '.join(sys.argv[1:]))", *argv[1:]]
+
+    try:
+        result = subprocess.run(
+            command, shell=False, capture_output=True, text=True, timeout=30
+        )
+    except FileNotFoundError:
+        return False, f"Không tìm thấy lệnh: {argv[0]}"
+
+    if result.returncode == 0:
+        return True, result.stdout
+    return False, result.stderr or f"rc={result.returncode}"
 
 
 # ==================================================================
@@ -197,12 +247,16 @@ class ApprovalGate:
         decision chỉ nhận "approve" hoặc "reject"; giá trị khác → ValueError.
         Mỗi bản ghi là dict có đủ khoá: gate, decision, detail.
         """
-        ### TODO 8 ### — viết code của bạn ở đây
+        if decision not in ("approve", "reject"):
+            raise ValueError("decision must be 'approve' or 'reject'")
+        self.audit.append({"gate": gate, "decision": decision, "detail": detail})
 
     def is_approved(self, gate: str) -> bool:
         """True chỉ khi cổng này có ÍT NHẤT một bản ghi decision == 'approve'."""
-        ### TODO 9 ### — viết code của bạn ở đây
-        return False
+        return any(
+            entry["gate"] == gate and entry["decision"] == "approve"
+            for entry in self.audit
+        )
 
 
 def apply_patch(plan: PatchPlan, recipes: dict, gate: ApprovalGate,
@@ -222,8 +276,38 @@ def apply_patch(plan: PatchPlan, recipes: dict, gate: ApprovalGate,
     Dict trả về gồm các khoá: status, recipe_id, steps (list mô tả),
     rollback_done (bool).
     """
-    ### TODO 10 ### — viết code của bạn ở đây
-    return {"status": "blocked", "recipe_id": None, "steps": [], "rollback_done": False}
+    result = {
+        "status": "blocked",
+        "recipe_id": plan.recipe_id,
+        "steps": [],
+        "rollback_done": False,
+    }
+    validation = validate_plan(plan, recipes)
+    if not validation.ok:
+        result["steps"].extend(validation.messages)
+        return result
+
+    if not gate.is_approved("gate2_patch"):
+        result["status"] = "rejected"
+        return result
+
+    recipe = recipes[plan.recipe_id]
+    for phase in ("pre_checks", "apply", "regression_tests"):
+        for step in recipe.get(phase, []):
+            rendered = {**step, "argv": render_argv(step, plan.variables)}
+            ok, description = execute_step(rendered, dry_run=dry_run)
+            result["steps"].append(f"{step.get('name', phase)}: {description}")
+            if phase == "regression_tests" and not ok:
+                for rollback_step in recipe.get("rollback", []):
+                    rendered = {**rollback_step, "argv": render_argv(rollback_step, plan.variables)}
+                    _, description = execute_step(rendered, dry_run=dry_run)
+                    result["steps"].append(f"{rollback_step.get('name', 'rollback')}: {description}")
+                result["rollback_done"] = True
+                result["status"] = "rolled_back"
+                return result
+
+    result["status"] = "closed"
+    return result
 
 
 # ==================================================================
