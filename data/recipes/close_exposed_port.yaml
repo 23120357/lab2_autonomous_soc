@@ -1,0 +1,26 @@
+id: close_exposed_port
+name: "Đóng cổng không cần thiết"
+metadata:
+  approved_by: "security-team"
+  scope: lab_only
+  risk_level: low
+  requires_approval: true
+variables:
+  service_name:
+    required: true
+    allow_pattern: '^[a-zA-Z0-9_-]{1,64}$'
+  port:
+    required: true
+    allow_pattern: '^[0-9]{2,5}$'
+pre_checks:
+  - name: "Xem cổng đang mở"
+    argv: ["docker", "port", "{{service_name}}"]
+apply:
+  - name: "Ghi nhận cổng cần đóng"
+    argv: ["echo", "đóng cổng {{port}} của {{service_name}}"]
+regression_tests:
+  - name: "Kiểm tra lại cổng"
+    argv: ["docker", "port", "{{service_name}}"]
+rollback:
+  - name: "Khôi phục ánh xạ cổng"
+    argv: ["echo", "khôi phục cổng {{port}}"]

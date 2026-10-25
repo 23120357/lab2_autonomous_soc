@@ -1,0 +1,32 @@
+id: docker_compose_update_image
+name: "Cập nhật image trong Docker Compose"
+metadata:
+  approved_by: "security-team"
+  scope: lab_only
+  risk_level: medium
+  requires_approval: true
+variables:
+  service_name:
+    required: true
+    allow_pattern: '^[a-zA-Z0-9_-]{1,64}$'
+  new_image_tag:
+    required: true
+    allow_pattern: '^[a-zA-Z0-9][a-zA-Z0-9._/:-]{1,127}$'
+  compose_file:
+    required: false
+    default: "./docker-compose.lab.yml"
+    allow_pattern: '^\./[a-zA-Z0-9._/-]{1,128}\.ya?ml$'
+pre_checks:
+  - name: "Docker khả dụng"
+    argv: ["docker", "version", "--format", "{{.Server.Version}}"]
+apply:
+  - name: "Kéo image đã vá"
+    argv: ["docker", "pull", "{{new_image_tag}}"]
+  - name: "Khởi động lại service"
+    argv: ["docker", "compose", "-f", "{{compose_file}}", "up", "-d", "{{service_name}}"]
+regression_tests:
+  - name: "Service đang chạy"
+    argv: ["docker", "compose", "-f", "{{compose_file}}", "ps", "{{service_name}}"]
+rollback:
+  - name: "Quay lại image cũ"
+    argv: ["docker", "compose", "-f", "{{compose_file}}", "up", "-d", "{{service_name}}"]
